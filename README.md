@@ -128,7 +128,7 @@ ReShade 启动时会自动加载同目录下所有 `*.addon64`，不需要改任
 生效时会看到类似内容：
 
 ```
-[PreUI] ===== AddonInit v0.8.0 =====
+[PreUI] ===== AddonInit v0.7.0 =====
 [PreUI] delaying hook for 120 frames
 [PreUI] target _nvngx.dll!NVSDK_NGX_D3D12_EvaluateFeature -> 00007FFED8276F90
 [PreUI] proxy offset resolved: 8 (native=00000000E44E6750)
@@ -235,27 +235,41 @@ cmake --build build --config Release
 
 ## 发布新版本
 
-版本号唯一来源是 `CMakeLists.txt` 的 `project(reshade_preui_addon VERSION x.y.z)`，
+版本号唯一来源是 `CMakeLists.txt` 的 `project(reshade_preui VERSION x.y.z)`，
 编译期通过 `PREUI_VERSION` 宏注入到日志里。发布流程：
 
 ```bat
 :: 1. 改 CMakeLists.txt 里的 VERSION，并在 CHANGELOG.md 记一笔
 :: 2. 提交
 git add -A
-git commit -m "release: v0.8.0"
+git commit -m "release: v0.7.0"
 git push
 
-:: 3. 打 tag 并推送（tag 必须与 CMake VERSION 一致，否则 workflow 会直接失败）
-git tag v0.8.0
-git push origin v0.8.0
+:: 3. 打 tag 并推送（tag 与 CMake VERSION 必须一致，否则 workflow 直接失败）
+git tag v0.7
+git push origin v0.7
 ```
+
+> tag 写 `v0.7` 或 `v0.7.0` 都可以：CI 会把两边都归一化成 `主.次.修订` 再比较，
+> 所以 `v0.7` 与 `VERSION 0.7.0` 视为一致。
 
 `Release` workflow 会：
 
-1. 校验 tag 与 `CMakeLists.txt` 的 VERSION 是否一致（不一致直接报错，避免发错版本）；
+1. 校验 tag 与 `CMakeLists.txt` 的 VERSION（归一化后）是否一致，不一致直接报错，避免发错版本；
 2. 编译；
-3. 打包 `ReShade_PreUI-v0.8.0.zip`（内含 `.addon64`、`PreUI.ini`、README、CHANGELOG、LICENSE）；
+3. 打包 `ReShade_PreUI-v0.7.0.zip`（内含 `.addon64`、`PreUI.ini`、README、CHANGELOG、LICENSE、
+   THIRD_PARTY_NOTICES、VERSION.txt）；
 4. 创建 GitHub Release 并附上 zip。
+
+如果 tag 已经推送过、只是改了 workflow 想重跑：先删远端 tag 再重推（或改用 Actions 页面的
+**Run workflow** 手动指定 tag，但它构建的是默认分支的最新提交，不是 tag 指向的提交）：
+
+```bat
+git tag -d v0.7
+git push origin :refs/tags/v0.7
+git tag v0.7
+git push origin v0.7
+```
 
 ---
 

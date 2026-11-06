@@ -1,14 +1,15 @@
 name: Release
 
-# 用法：git tag v0.8.0 && git push origin v0.8.0
+# 用法：git tag v0.7 && git push origin v0.7
 # 会自动编译、打包 zip、创建 GitHub Release 并附上产物。
+# tag 可以写 v0.7 也可以写 v0.7.0，会按 主.次.修订 归一化后与 CMake 的 VERSION 比较。
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: '要（重新）发布的 tag，例如 v0.8.0'
+        description: '要（重新）发布的 tag，例如 v0.7'
         required: true
 
 permissions:
@@ -32,17 +33,26 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          # 把 0.7 / v0.7 / 0.7.0 / v0.7.0 统一成 0.7.0
+          function Normalize-Version([string] $v) {
+            $p = @((($v.Trim()) -replace '^[vV]', '') -split '\.')
+            while ($p.Count -lt 3) { $p += '0' }
+            return ($p[0..2] -join '.')
+          }
+
           $tag = if ('${{ github.event.inputs.tag }}' -ne '') { '${{ github.event.inputs.tag }}' } else { $env:GITHUB_REF_NAME }
-          $tagVer = $tag -replace '^v', ''
 
           $cmake = Get-Content 'CMakeLists.txt' -Raw
-          if ($cmake -notmatch 'project\s*\(\s*reshade_preui\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+          if ($cmake -notmatch 'project\s*\(\s*reshade_preui\s+VERSION\s+([0-9]+(\.[0-9]+)*)') {
             throw 'cannot read VERSION from CMakeLists.txt'
           }
-          $cmakeVer = $Matches[1]
+
+          $cmakeVer = Normalize-Version $Matches[1]
+          $tagVer   = Normalize-Version $tag
 
           if ($tagVer -ne $cmakeVer) {
-            throw "tag '$tag' (=> $tagVer) does not match CMakeLists.txt VERSION ($cmakeVer)"
+            throw "tag '$tag' (=> $tagVer) does not match CMakeLists.txt VERSION ($cmakeVer). 改一处，让两边一致。"
           }
 
           Write-Host "releasing $tag (version $cmakeVer)"
@@ -81,7 +91,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = '${{ steps.ver.outputs.tag }}'
+          $ver = '${{ steps.ver.outputs.version }}'
 
           $dll = Get-ChildItem -Recurse -Filter '*.addon64' | Select-Object -First 1
           if (-not $dll) { throw 'ReShade_PreUI.addon64 was not produced' }
@@ -89,14 +99,14 @@ jobs:
           $stage = 'stage'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item $dll.FullName (Join-Path $stage 'ReShade_PreUI.addon64')
-          Copy-Item 'PreUI.ini'            $stage
-          Copy-Item 'README.md'            $stage
-          Copy-Item 'CHANGELOG.md'         $stage
-          Copy-Item 'LICENSE'              $stage
+          Copy-Item 'PreUI.ini'              $stage
+          Copy-Item 'README.md'              $stage
+          Copy-Item 'CHANGELOG.md'           $stage
+          Copy-Item 'LICENSE'                $stage
           Copy-Item 'THIRD_PARTY_NOTICES.md' $stage
-          Set-Content -Path (Join-Path $stage 'VERSION.txt') -Value $tag -NoNewline
+          Set-Content -Path (Join-Path $stage 'VERSION.txt') -Value "v$ver" -NoNewline
 
-          $zip = "ReShade_PreUI-$tag.zip"
+          $zip = "ReShade_PreUI-v$ver.zip"
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
           Write-Host "packaged $zip ($((Get-Item $zip).Length) bytes)"
           (Get-FileHash $zip -Algorithm SHA256).Hash
@@ -134,10 +144,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $tag = '${{ steps.ver.outputs.tag }}'
-          $zip = "ReShade_PreUI-$tag.zip"
+          $ver = '${{ steps.ver.outputs.version }}'
+          $zip = "ReShade_PreUI-v$ver.zip"
 
           gh release create $tag $zip `
-            --title "ReShade Pre-UI $tag" `
+            --title "ReShade Pre-UI v$ver" `
             --notes-file release-body.md `
             --verify-tag
           if ($LASTEXITCODE -eq 0) { exit 0 }
