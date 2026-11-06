@@ -1,0 +1,150 @@
+name: Release
+
+# 用法：git tag v0.8.0 && git push origin v0.8.0
+# 会自动编译、打包 zip、创建 GitHub Release 并附上产物。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要（重新）发布的 tag，例如 v0.8.0'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & publish
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = if ('${{ github.event.inputs.tag }}' -ne '') { '${{ github.event.inputs.tag }}' } else { $env:GITHUB_REF_NAME }
+          $tagVer = $tag -replace '^v', ''
+
+          $cmake = Get-Content 'CMakeLists.txt' -Raw
+          if ($cmake -notmatch 'project\s*\(\s*reshade_preui\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+            throw 'cannot read VERSION from CMakeLists.txt'
+          }
+          $cmakeVer = $Matches[1]
+
+          if ($tagVer -ne $cmakeVer) {
+            throw "tag '$tag' (=> $tagVer) does not match CMakeLists.txt VERSION ($cmakeVer)"
+          }
+
+          Write-Host "releasing $tag (version $cmakeVer)"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$cmakeVer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # 与 build.yml 完全一致：固定 ReShade v6.8.0 头文件
+      - name: Sync ReShade headers (v6.8.0)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://raw.githubusercontent.com/crosire/reshade/v6.8.0/include'
+          $dir  = 'third_party/reshade/include'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $files = @(
+            'reshade.hpp',
+            'reshade_api.hpp',
+            'reshade_api_device.hpp',
+            'reshade_api_format.hpp',
+            'reshade_api_pipeline.hpp',
+            'reshade_api_resource.hpp',
+            'reshade_events.hpp',
+            'reshade_overlay.hpp'
+          )
+          foreach ($f in $files) {
+            Invoke-WebRequest -Uri "$base/$f" -OutFile "$dir/$f" -UseBasicParsing
+          }
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ steps.ver.outputs.tag }}'
+
+          $dll = Get-ChildItem -Recurse -Filter '*.addon64' | Select-Object -First 1
+          if (-not $dll) { throw 'ReShade_PreUI.addon64 was not produced' }
+
+          $stage = 'stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $dll.FullName (Join-Path $stage 'ReShade_PreUI.addon64')
+          Copy-Item 'PreUI.ini'            $stage
+          Copy-Item 'README.md'            $stage
+          Copy-Item 'CHANGELOG.md'         $stage
+          Copy-Item 'LICENSE'              $stage
+          Copy-Item 'THIRD_PARTY_NOTICES.md' $stage
+          Set-Content -Path (Join-Path $stage 'VERSION.txt') -Value $tag -NoNewline
+
+          $zip = "ReShade_PreUI-$tag.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
+          Write-Host "packaged $zip ($((Get-Item $zip).Length) bytes)"
+          (Get-FileHash $zip -Algorithm SHA256).Hash
+
+      - name: Write release body
+        shell: pwsh
+        run: |
+          @'
+          ## 安装
+
+          1. 确认游戏目录里已经装好 **ReShade 6.8.0**（`dxgi.dll` 或 `d3d12.dll`）。
+          2. 把压缩包里的 `ReShade_PreUI.addon64` 和 `PreUI.ini` 解压到**游戏 exe 同目录**。
+          3. 进游戏，在视频设置里**开启 DLSS**，进实际场景（不是菜单）。
+          4. 打开 ReShade 面板勾一个滤镜：**只有 3D 画面变色、UI 不变**就是生效了。
+
+          ## 首次运行会生成
+
+          - `PreUI.log`：add-on 自己的日志，出现 `injected N frames` 即表示逐帧注入成功。
+          - 如果看不到 `injected`，把 `PreUI.log` 和 `ReShade.log` 的最后 30 行贴到 Issue。
+
+          ## 注意
+
+          - **必须开 DLSS**：注入点就在 DLSS 的输出上；关掉 DLSS 时不工作，ReShade 会回到默认行为（UI 会被滤镜影响）。
+          - 建议先关闭 **DLSS 帧生成（DLSS-G）** 测试。
+          - DLSS 输出是 HDR（`R16G16B16A16_FLOAT`），为"后 tonemap"写的 `.fx` 观感会偏，需要 HDR 适配的预设。
+          - 注入 DLL 进在线游戏存在账号风险，请自行评估。
+
+          完整说明见仓库内 `README.md`，改动见 `CHANGELOG.md`。
+          '@ | Set-Content -Path 'release-body.md' -Encoding utf8
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tag = '${{ steps.ver.outputs.tag }}'
+          $zip = "ReShade_PreUI-$tag.zip"
+
+          gh release create $tag $zip `
+            --title "ReShade Pre-UI $tag" `
+            --notes-file release-body.md `
+            --verify-tag
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+
+          # 已存在（workflow_dispatch 重跑）：换成覆盖上传 + 更新说明
+          Write-Host 'release already exists, uploading asset instead'
+          gh release upload $tag $zip --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gh release edit $tag --notes-file release-body.md
+          exit $LASTEXITCODE

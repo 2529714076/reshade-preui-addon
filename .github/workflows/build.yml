@@ -1,0 +1,76 @@
+name: Build
+
+# 每次 push / PR 都编译一遍，产物作为 artifact 供手动下载。
+# 打 tag（v*）时走 release.yml，自动创建 GitHub Release。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ReShade add-on 头文件固定到 v6.8.0（RESHADE_API_VERSION = 20）。
+      # 每次从上游重新拉取，保证与你本机 ReShade 6.8.0 完全对齐。
+      # 注意：reshade.hpp 会 #include "reshade_overlay.hpp"，漏掉会报 C1083。
+      - name: Sync ReShade headers (v6.8.0)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://raw.githubusercontent.com/crosire/reshade/v6.8.0/include'
+          $dir  = 'third_party/reshade/include'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $files = @(
+            'reshade.hpp',
+            'reshade_api.hpp',
+            'reshade_api_device.hpp',
+            'reshade_api_format.hpp',
+            'reshade_api_pipeline.hpp',
+            'reshade_api_resource.hpp',
+            'reshade_events.hpp',
+            'reshade_overlay.hpp'
+          )
+          foreach ($f in $files) {
+            Write-Host "fetch $f"
+            Invoke-WebRequest -Uri "$base/$f" -OutFile "$dir/$f" -UseBasicParsing
+          }
+          Get-ChildItem $dir | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = Get-ChildItem -Recurse -Filter '*.addon64' | Select-Object -First 1
+          if (-not $dll) { throw 'ReShade_PreUI.addon64 was not produced' }
+          Write-Host "built: $($dll.FullName) ($($dll.Length) bytes)"
+          (Get-FileHash $dll.FullName -Algorithm SHA256).Hash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReShade_PreUI
+          path: |
+            build/Release/*.addon64
+            build/*.addon64
+          if-no-files-found: error
+          retention-days: 30
